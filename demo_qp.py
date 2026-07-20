@@ -7,6 +7,36 @@ from mlagents_envs.side_channel.environment_parameters_channel import Environmen
 from mlagents_envs.base_env import ActionTuple
 from qp_colreg_controller import QPColregController
 
+# metric system
+class MetricsTracker:
+    def __init__(self, d_safe):
+        self.d_safe = d_safe
+        self.violations_count = 0
+        self.total_steps = 0
+        self.min_distances = []
+
+    def log_step(self, intruders):
+        self.total_steps += 1
+        if len(intruders) > 0:
+            min_dist = min([np.linalg.norm(pos) for pos, vel in intruders])
+            self.min_distances.append(min_dist)
+            
+            if min_dist < self.d_safe:
+                self.violations_count += 1
+
+    def print_report(self):
+        print("\n" + "="*40)
+        print(" REPORT METRICS ")
+        print(f"Total steps simulated: {self.total_steps}")
+        print(f"R1 constraint violations (dist < {self.d_safe}m): {self.violations_count}")
+        if self.total_steps > 0:
+            print(f"Percentage of violations: {(self.violations_count / self.total_steps) * 100:.2f}%")
+        
+        if self.min_distances:
+            print(f"Average obstacle distance: {np.mean(self.min_distances):.2f} m")
+            print(f"Standard deviation distance: {np.std(self.min_distances):.2f} m")
+        print("="*40 + "\n")
+
 # Kinematics transformation from u_otp with x and y coordinates to Throttle and steering
 def map_velocity_to_differential_inputs(u_opt, max_speed=2.5):
 
@@ -31,7 +61,7 @@ def main():
 
     # Communication with ML-Agemts
     env_params_channel = EnvironmentParametersChannel()
-    env_params_channel.set_float_parameter("eval_episode_seed", 15.0) #where is the tagret
+    env_params_channel.set_float_parameter("eval_episode_seed", 55.0) #where is the tagret
     env_params_channel.set_float_parameter("curriculumStage", 2.0)
 
     print("Waiting for connection to Unity")
@@ -40,9 +70,19 @@ def main():
     env.reset()
 
     behavior_name = list(env.behavior_specs.keys())[0]
+    
     # Initialize the controller with safety parameters
     # Initialize the controller with safety parameters and disable or enable COLREGs
-    controller = QPColregController(d_safe=3.0, gamma=1.2, v_max=2.5, enable_colregs=True)
+    controller = QPColregController(d_safe=3.0, gamma=1.2, v_max=2.5, r_threshold=0.1, enable_colregs=True)
+    
+    # Initializer for metrics
+    metrics = MetricsTracker(d_safe=3.0)
+
+    # Fixed buoys decided a priori (hardcoded)
+    hardcoded_buoys_relative = [
+        np.array([2.0, 5.0]),   # Example: Buoy 2m to the right, 5m ahead
+        np.array([-3.0, 7.0])   # Example: Buoy 3m to the left, 7m ahead
+    ]
 
     print(f"Connected to: {behavior_name}")
     print("Avoidance logic active. Vessel (GPS) and buoy (Laser) monitoring in progress...")
@@ -54,7 +94,7 @@ def main():
             decision_steps, terminal_steps = env.get_steps(behavior_name)
 
             if len(decision_steps) > 0:
-                # --- 1. Separate sensors values ---
+                # 1. Separate sensors values
                 obs_gps = None
                 obs_ray = None
                 
@@ -73,7 +113,7 @@ def main():
                 
                 intruders = []
                 
-                # --- 2. MOBILE SHIP LOGIC (from GPS) ---
+                # 2. MOBILE SHIP LOGIC (from GPS)
                 if len(obs_gps) >= 13 and obs_gps[8] < 0.99:
                     pos = obs_gps[6:8] * (obs_gps[8] * 43.0)
                     vel = (obs_gps[9:11] * 5.0) + v_agent_local
@@ -84,7 +124,7 @@ def main():
                     vel = (obs_gps[16:18] * 5.0) + v_agent_local
                     intruders.append((pos, vel))
 
-                # --- 3. STATIC BUOY LOGIC (from corrected Raycast) ---
+                # 3. STATIC BUOY LOGIC (from corrected Raycast)
                 if obs_ray is not None:
                     # Array of 14 elements = 7 rays * 2 values ​​for ray: [hit_it, fraction_distance]
                     angles_deg = [-90, -45, -15, 0, 15, 45, 90]
@@ -108,7 +148,15 @@ def main():
                             
                             intruders.append((pos_boa, vel_boa))
 
-                # --- 4. QP CONTROL ---
+                # BOE HARDCODED (Aggiunte bypassando i laser) 
+                for pos_boa in hardcoded_buoys_relative:
+                    vel_boa = np.array([0.0, 0.0]) # Le boe sono ferme
+                    intruders.append((pos_boa, vel_boa))
+
+                # Recording metric data of the current frame
+                metrics.log_step(intruders)
+
+                # 4. QP CONTROL
                 u_opt = controller.compute_control(np.array([0,0]), v_nominal, intruders)
                 control_actions = map_velocity_to_differential_inputs(u_opt, max_speed=2.5)
 
@@ -131,6 +179,8 @@ def main():
     except KeyboardInterrupt:
         print("\nSimulation interrupted.")
     finally:
+        # When the script is stopped, it automatically prints the metrics
+        metrics.print_report()
         env.close()
 
 if __name__ == "__main__":
