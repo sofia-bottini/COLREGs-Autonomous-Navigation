@@ -6,10 +6,11 @@ solvers.options['show_progress'] = False
 
 class QPColregController:
     # I add the parameter enable_colregs (default at False to start progressively)
-    def __init__(self, d_safe=3.0, gamma=1.2, v_max=2.5, enable_colregs=False):
+    def __init__(self, d_safe=3.0, gamma=1.2, v_max=2.5, r_threshold=0.1, enable_colregs=False):
         self.d_safe = d_safe
         self.gamma = gamma
         self.v_max = v_max
+        self.r_threshold = r_threshold
         self.enable_colregs = enable_colregs 
 
     # base of the Quadratic Programming Algorithm to find min(0.5*u^T*P*u+q^T*u)
@@ -32,14 +33,18 @@ class QPColregController:
             if dist < 0.1:
                 continue
 
-            # --- RULE R1: SAFE DISTANCE (Obstacle Avoidance Pura) with CBF ---
-            h = dist**2 - self.d_safe**2 #h(x)>d_safe
-            grad_h = -2 * pos_rel #boat direction
+            # RULE R1: SAFE DISTANCE (Obstacle Avoidance Pura) with CBF
+            h_R1 = dist**2 - self.d_safe**2 #h(x)>d_safe
+            grad_h_R1 = -2 * pos_rel #boat direction
             
-            gamma_val = self.gamma
-            h_cbf_val = gamma_val * h
+            # I add the processed constraints to the QP (Regola R1 sempre in AND)
+            G_cbf = -grad_h_R1.reshape(1, 2)
+            h_cbf = np.array([self.gamma * h_R1 - self.r_threshold])
+            
+            A_list.append(G_cbf)
+            b_list.append(h_cbf)
 
-            # --- >RULES COLREGs (Verify if the obstacle is moving and if it's in front of us ) ---
+            # RULES COLREGs (Verify if the obstacle is moving and if it's in front of us )
             if self.enable_colregs:
                 is_moving = np.linalg.norm(vel_rel) > 0.1
                 is_ahead = np.dot(pos_rel, v_nominal) > 0
@@ -48,27 +53,35 @@ class QPColregController:
                 if not is_ahead and is_moving:
                     continue 
                 
-                # If the result is negative, the obstacle is to the left (Port).
-                # If the result is positive, the obstacle is to the right (Starboard).
-                cross_product = pos_rel[0] * v_nominal[1] - pos_rel[1] * v_nominal[0]
-                
-                # RULE R6: Stand-on Vessel (verify if the boat coming from left cross_product<0)
-                is_stand_on = (cross_product < 0) and (dist < self.d_safe * 4)
-                if is_stand_on and is_moving:
-                    gamma_val = self.gamma * 0.2 # relax the bond
-                    h_cbf_val = gamma_val * h
-                
-                # RULES R3/R4: Give-way Vessel 
-                if not is_stand_on and is_moving and dist < (self.d_safe * 3):
-                    if cross_product > 0: # the ship is ahead
-                        h_cbf_val = h_cbf_val * 0.5 # I halve the allowable margin of maneuver
+                if is_moving:
+                    # If the result is negative, the obstacle is to the left (Port).
+                    # If the result is positive, the obstacle is to the right (Starboard).
+                    cross_product = pos_rel[0] * v_nominal[1] - pos_rel[1] * v_nominal[0]
+                    
+                    # RULE R6: Stand-on Vessel (verify if the boat coming from left cross_product<0)
+                    # RULES R3/R4: Give-way Vessel 
+                    # Eq. 6 from paper: a -> b equivale a max(-rho_a, rho_b) >= r
+                    
+                    rho_a = cross_product  # >0 the ship is ahead and to the right
+                    rho_b = -cross_product # We want to bring the obstacle to our left (<0)
 
-            # I add the processed constraints to the QP
-            G_cbf = -grad_h.reshape(1, 2)
-            h_cbf = np.array([h_cbf_val])
+                    # Calculate the maximum between the two robustness functions (STL logical OR)
+                    if -rho_a > rho_b:
+                        h_OR = -rho_a
+                        grad_OR = np.array([-pos_rel[1], pos_rel[0]]) * -1
+                    else:
+                        h_OR = rho_b
+                        grad_OR = np.array([-pos_rel[1], pos_rel[0]]) * -1
 
-            A_list.append(G_cbf)
-            b_list.append(h_cbf)
+                    # I halve the allowable margin of maneuver (rilassato/irrigidito ora gestito da Eq.6)
+                    # relax the bond
+                    
+                    # I add the processed constraints to the QP (AND with R1)
+                    G_colreg = -grad_OR.reshape(1, 2)
+                    h_colreg = np.array([self.gamma * h_OR - self.r_threshold])
+                    
+                    A_list.append(G_colreg)
+                    b_list.append(h_colreg)
 
         G = matrix(np.vstack(A_list)) if A_list else matrix(np.empty((0, 2)))
         h = matrix(np.hstack(b_list)) if b_list else matrix(np.empty((0,)))
