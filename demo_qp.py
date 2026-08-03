@@ -46,13 +46,14 @@ def map_velocity_to_differential_inputs(u_opt, max_speed=2.5):
         return np.array([0.0, 0.0], dtype=np.float32)
     
     angle_des_rad = math.atan2(vx_des, vy_des) 
-    kp_steering = 3.0
+    kp_steering = 3.5
     steering = np.clip(kp_steering * angle_des_rad, -1.0, 1.0)
     
     # I ease off the throttle when the steering angle increases.
     # This prevents heeling and allows the boat to make sharp turns earlier.
-    throttle = max(0.2, math.cos(angle_des_rad))
-    
+    throttle_reduction = 1.0 - (0.35 * abs(steering)) 
+    throttle = max(0.65, throttle_reduction)
+
     return np.array([throttle, steering], dtype=np.float32)
 
 def main():
@@ -184,3 +185,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    
