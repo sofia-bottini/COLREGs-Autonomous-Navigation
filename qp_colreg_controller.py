@@ -17,6 +17,11 @@ class QPColregController:
         self.gamma_colreg = 0.8  # Softer reaction for maritime rules (prevents chattering)
         self.r_colreg = 0.2      # Independent robustness margin for COLREGs
         self.mu_smooth = 5.0     # Smoothing parameter for Eq. 6 (Log-Sum-Exp)
+        
+        # Eq. 5 PARAMETERS (Relaxation Term o_j)
+        self.decay_rate = 5.0    # Decay rate for o_j(t) to reach zero smoothly
+        self.oj_memory = {}      # Dictionary to track o_j(t) history for each obstacle
+        self.dt = 0.1            # Estimated simulation time step
 
     # base of the Quadratic Programming Algorithm to find min(0.5*u^T*P*u+q^T*u)
     def compute_control(self, p_self, v_nominal, intruders):
@@ -34,10 +39,17 @@ class QPColregController:
         A_list.append(G_speed)
         b_list.append(h_speed)
 
+        # Track currently visible intruders to clean up oj_memory
+        current_intruder_ids = []
+
         for pos_rel, vel_rel in intruders:
             dist = np.linalg.norm(pos_rel)
             if dist < 0.1:
                 continue
+                
+            # Generate a temporary ID based on relative position to track o_j(t) consistently
+            intruder_id = f"{round(pos_rel[0],1)}_{round(pos_rel[1],1)}"
+            current_intruder_ids.append(intruder_id)
                 
             # Dynamic size of obstacles
             is_moving = np.linalg.norm(vel_rel) > 0.1
@@ -98,10 +110,37 @@ class QPColregController:
                 val_b = rho_b
                 max_val = max(val_a, val_b)
                 
-                h_OR = max_val + (1.0 / self.mu_smooth) * np.log(np.exp(self.mu_smooth * (val_a - max_val)) + np.exp(self.mu_smooth * (val_b - max_val)))
+                exp_a = np.exp(self.mu_smooth * (val_a - max_val))
+                exp_b = np.exp(self.mu_smooth * (val_b - max_val))
+                sum_exp = exp_a + exp_b
                 
-                # Original correct gradient for COLREGs Eq 6
-                grad_OR = np.array([-pos_rel[1], pos_rel[0]]) * -1
+                h_OR_raw = max_val + (1.0 / self.mu_smooth) * np.log(sum_exp)
+                
+                # Eq. 5: RELAXATION TERM o_j(t)
+                # Prevents over-conservative behaviors if the CBF is already violated upon detection
+                if intruder_id not in self.oj_memory:
+                    if h_OR_raw < self.r_colreg:
+                        self.oj_memory[intruder_id] = abs(h_OR_raw - self.r_colreg) + 0.1
+                    else:
+                        self.oj_memory[intruder_id] = 0.0
+                
+                # Exponential decay of the relaxation term
+                self.oj_memory[intruder_id] *= np.exp(-self.decay_rate * self.dt)
+                o_j_t = self.oj_memory[intruder_id]
+                
+                # Final h_OR with relaxation term included
+                h_OR = h_OR_raw + o_j_t
+                
+                # Eq. 9: G_OR WITH SOFTMAX WEIGHTED GRADIENT
+                # Properly calculates the gradient of the smooth max function
+                w_a = exp_a / sum_exp
+                w_b = exp_b / sum_exp
+                
+                grad_a = np.array([-pos_rel[1], pos_rel[0]]) * -1
+                grad_b = np.array([-pos_rel[1], pos_rel[0]]) * -1
+                
+                # Weighted sum of gradients
+                grad_OR = w_a * grad_a + w_b * grad_b
 
                 # I halve the allowable margin of maneuver (rilassato/irrigidito ora gestito da Eq.6)
                 # relax the bond
@@ -114,6 +153,9 @@ class QPColregController:
                 
                 A_list.append(G_colreg)
                 b_list.append(h_colreg)
+
+        # Cleanup oj_memory for obstacles that are no longer in range (prevents memory leaks)
+        self.oj_memory = {k: v for k, v in self.oj_memory.items() if k in current_intruder_ids}
 
         G = matrix(np.vstack(A_list)) if A_list else matrix(np.empty((0, 2)))
         h = matrix(np.hstack(b_list)) if b_list else matrix(np.empty((0,)))
