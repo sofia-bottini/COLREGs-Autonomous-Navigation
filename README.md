@@ -30,8 +30,12 @@ You will need Python 3.8+ and the Unity Editor to run the simulation.
    git clone [https://github.com/sofia-bottini/COLREGs-Autonomous-Navigation.git](https://github.com/sofia-bottini/COLREGs-Autonomous-Navigation.git)
    cd COLREGs-Autonomous-Navigation
 
-Install the dependencies: pip install numpy cvxopt mlagents
-Run the controller: python demo_qp.py
+2. Install the dependencies:
+   ```bash
+   pip install numpy cvxopt mlagents
+3. Run the controller:
+   ```bash
+   python demo_qp.py
 When the terminal says Waiting for connection to Unity, press the Play button inside the Unity Editor.
 
 Results
